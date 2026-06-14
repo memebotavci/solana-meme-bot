@@ -13,28 +13,23 @@ load_dotenv()
 
 # Sayfa Yapılandırması
 str_web.set_page_config(page_title="Özel Trading Terminali", layout="wide")
-str_web.title("🎯 Benim Özel Solana Avcı Terminalim (Helius Live Engine)")
-str_web.caption("Sıfır Bulut Engeli - Doğrudan Helius Canlı Hattından Anlık Raydium Havuz Akışı")
+str_web.title("🎯 Benim Özel Solana Avcı Terminalim (Solana Core v2)")
+str_web.caption("Sıfır Bulut Engeli - Raydium CPMM & AMM Canlı Havuz Yakalayıcı")
 
 # --- ⚙️ SOL MENÜ: KİŞİSEL FİLTRELERİNİZ ---
 str_web.sidebar.header("🛡️ Canlı Av Filtreleri")
 BUY_AMOUNT_SOL = str_web.sidebar.number_input("Alım Miktarı (SOL)", min_value=0.005, value=0.01, step=0.005)
-min_liq_usd = str_web.sidebar.number_input("Minimum Güvenli Likidite ($)", value=2000, step=500)
+min_liq_usd = str_web.sidebar.number_input("Minimum Güvenli Likidite ($)", value=1500, step=500)
 
-# Ortam Değişkenlerinden Helius Linklerini Al
 RAYDIUM_PROGRAM_ID = "675kPX9M4SG31g95s899vVn72p6w4fdfp4n75a8Jtxb7"
-HTTPS_URL = os.getenv("HELIUS_HTTPS_URL")
 WSS_URL = os.getenv("HELIUS_WSS_URL")
-PRIVATE_KEY_STR = os.getenv("PRIVATE_KEY")
 
-# Kalıcı Canlı Hafıza Havuzu (Token listesi için)
 if "my_working_data" not in str_web.session_state:
     str_web.session_state.my_working_data = []
 
-def check_liquidity_via_dex(token_address):
-    """Yakaladığımız coinin havuz derinliğini tekil kısıtlamasız API ile doğrular"""
+def get_token_details_safely(token_address):
+    """Yakaladığımız ham token adresini açık API üzerinden saniyeler içinde çözümler"""
     try:
-        # Tekil token sorguları bulut engeline takılmaz, kısıtlamasızdır
         url = f"https://dexscreener.com{token_address}"
         res = std_requests.get(url, timeout=5).json()
         pairs = res.get("pairs", [])
@@ -45,88 +40,77 @@ def check_liquidity_via_dex(token_address):
         volume = main_pair.get("volume", {})
         info = main_pair.get("info", {})
         
-        # Güvenlik Kontrolü: Sosyal medyası/reklamı var mı?
-        has_socials = "✅ VAR" if (len(info.get("socials", [])) > 0 or len(info.get("websites", [])) > 0) else "❌ YOK"
+        has_socials = "✅ AKTİF" if (len(info.get("socials", [])) > 0 or len(info.get("websites", [])) > 0) else "❌ YOK"
         
         if liquidity_usd >= min_liq_usd:
             return {
-                "Coin Adı": main_pair.get("baseToken", {}).get("name", "MemeCoin"),
+                "Coin Adı": main_pair.get("baseToken", {}).get("name", "Yeni Token"),
                 "Sembol": main_pair.get("baseToken", {}).get("symbol", "TOKEN").upper(),
                 "Kontrat Adresi (Mint)": token_address,
                 "Likidite ($)": liquidity_usd,
                 "5m Hacim ($)": float(volume.get("m5", 0)),
                 "1H Hacim ($)": float(volume.get("h1", 0)),
-                "24H Hacim ($)": float(volume.get("h24", 0)),
                 "Sosyal Medya": has_socials,
-                "Fiyat ($)": float(main_pair.get("priceUsd", 0))
+                "Anlık Fiyat ($)": float(main_pair.get("priceUsd", 0)) if main_pair.get("priceUsd") else 0.0
             }
     except:
         return None
     return None
 
-async def start_helius_listener():
-    """Helius Websocket üzerinden Solana ağındaki yeni Raydium işlemlerini canlı yakalar"""
+async def start_helius_v2_listener():
+    """Yeni nesil Solana havuz fonksiyonlarını ayrım yapmaksızın canlı yakalar"""
     subscribe_message = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "logsSubscribe",
         "params": [
             {"mentions": [RAYDIUM_PROGRAM_ID]},
-            {"commitment": "processed"}
+            {"commitment": "processed"} # En yüksek veri hızı
         ]
     }
     
-    # Helius WSS adresimiz bulut engellerine kapalıdır, %100 çalışır
     async for websocket in connect(WSS_URL):
         try:
             await websocket.send(json.dumps(subscribe_message))
-            await websocket.recv() # Onay mesajını geç
+            await websocket.recv()
             
             async for message in websocket:
                 data = json.loads(message)
                 if "params" in data:
                     result = data["params"]["result"]["value"]
-                    logs = result.get("logs", [])
-                    signature = result.get("signature")
+                    logs = str(result.get("logs", []))
                     
-                    # Eğer işlem bir yeni havuz açılışı ise (initialize2)
-                    if any("initialize2" in log for log in logs) and signature:
-                        # Akıllı analiz modülünü çağırarak veriyi çözüyoruz
-                        stats = check_liquidity_via_dex(signature)
-                        if stats and stats not in str_web.session_state.my_working_data:
-                            str_web.session_state.my_working_data.append(stats)
+                    # 🌟 YENİ NESİL ÇÖZÜM: Sadece initialize2 değil, tüm havuz açılış kelimelerini tara
+                    is_pool_creation = any(keyword in logs for keyword in ["initialize2", "initialize", "create_pool", "init_pool", "swapBaseIn"])
+                    
+                    if is_pool_creation:
+                        # İşlemin içindeki potansiyel cüzdan adreslerini veya tokenları taramak için imzayı süzüyoruz
+                        signature = result.get("signature")
+                        if signature:
+                            # Jupiter/DexScreener entegrasyonuyla token detaylarını çek
+                            stats = get_token_details_safely(signature)
+                            if stats and stats not in str_web.session_state.my_working_data:
+                                str_web.session_state.my_working_data.append(stats)
         except:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
-# Arka plan motorunu Streamlit arayüzünü dondurmadan çalıştırma (Threading)
-if "engine_running" not in str_web.session_state:
-    str_web.session_state.engine_running = True
-    def run_async_engine():
-        asyncio.run(start_helius_listener())
-    threading.Thread(target=run_async_engine, daemon=True).start()
+# Arka plan iş parçacığı motoru
+if "engine_running_v2" not in str_web.session_state:
+    str_web.session_state.engine_running_v2 = True
+    def run_engine():
+        asyncio.run(start_helius_v2_listener())
+    threading.Thread(target=run_engine, daemon=True).start()
 
-# --- PANEL GÖRSEL ARAYÜZÜ ---
+# --- PANEL ARAYÜZÜ ---
 if str_web.button("🔄 Paneli Canlı Yenile / Güncelle", type="primary"):
     str_web.rerun()
 
 if str_web.session_state.my_working_data:
     df = pd.DataFrame(str_web.session_state.my_working_data).drop_duplicates(subset=["Kontrat Adresi (Mint)"])
-    str_web.success(f"✅ Helius Canlı Hattı filtrelerinize uyan {len(df)} adet coini başarıyla yakaladı!")
-    
-    str_web.dataframe(
-        df,
-        column_config={
-            "Likidite ($)": str_web.column_config.NumberColumn(format="$%d"),
-            "5m Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
-            "1H Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
-            "24H Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
-            "Fiyat ($)": str_web.column_config.NumberColumn(format="$%.6f"),
-        },
-        use_container_width=True
-    )
+    str_web.success(f"🔥 Canlı Solana Otobanından {len(df)} adet taze havuz başarıyla yakalandı!")
+    str_web.dataframe(df, use_container_width=True)
 else:
-    str_web.info("📡 Doğrudan Solana Ağ Otobanına Bağlanıldı. Kriterlerinize uyan yeni havuzlar Helius hattından bekleniyor...")
+    str_web.info("📡 Yeni Nesil Solana Havuz Otobanına Bağlanıldı. Kriterlerinize uyan taze coin akışı bekleniyor...")
 
-# 1 dakikada bir sayfayı otomatik tazele
 time.sleep(60)
 str_web.rerun()
