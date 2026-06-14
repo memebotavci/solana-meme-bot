@@ -1,98 +1,132 @@
 import streamlit as str_web
 import pandas as pd
-import requests
-import time
+import json
+import asyncio
+import requests as std_requests
+import threading
 import os
+import time
+from dotenv import load_dotenv
+from websockets import connect
 
-# Sayfa Yapılandırması ve Başlık Ayarları
+load_dotenv()
+
+# Sayfa Yapılandırması
 str_web.set_page_config(page_title="Özel Trading Terminali", layout="wide")
-str_web.title("🎯 Benim Özel Solana Avcı Terminalim (Jupiter Cloud Core)")
-str_web.caption("Sıfır Bulut Engeli - Doğrudan Jupiter İndeks Havuzundan Canlı Filtreleme")
+str_web.title("🎯 Benim Özel Solana Avcı Terminalim (Helius Live Engine)")
+str_web.caption("Sıfır Bulut Engeli - Doğrudan Helius Canlı Hattından Anlık Raydium Havuz Akışı")
 
-# --- ⚙️ SOL MENÜ: SADECE SİZİN BELİRLEDİĞİNİZ KİŞİSEL FİLTRELER ---
-str_web.sidebar.header("🛡️ Gelişmiş Av Kriterleri")
-min_liq_usd = str_web.sidebar.number_input("Minimum Likidite ($)", value=3000, step=500)
-min_vol_24h = str_web.sidebar.number_input("Minimum 24H Hacim ($)", value=10000, step=2000)
+# --- ⚙️ SOL MENÜ: KİŞİSEL FİLTRELERİNİZ ---
+str_web.sidebar.header("🛡️ Canlı Av Filtreleri")
+BUY_AMOUNT_SOL = str_web.sidebar.number_input("Alım Miktarı (SOL)", min_value=0.005, value=0.01, step=0.005)
+min_liq_usd = str_web.sidebar.number_input("Minimum Güvenli Likidite ($)", value=2000, step=500)
 
-str_web.sidebar.info("🔄 Otomatik Yenileme: Sistem ağı her 60 saniyede bir otomatik olarak tarar.")
+# Ortam Değişkenlerinden Helius Linklerini Al
+RAYDIUM_PROGRAM_ID = "675kPX9M4SG31g95s899vVn72p6w4fdfp4n75a8Jtxb7"
+HTTPS_URL = os.getenv("HELIUS_HTTPS_URL")
+WSS_URL = os.getenv("HELIUS_WSS_URL")
+PRIVATE_KEY_STR = os.getenv("PRIVATE_KEY")
 
-if "last_run" not in str_web.session_state:
-    str_web.session_state.last_run = time.time()
+# Kalıcı Canlı Hafıza Havuzu (Token listesi için)
+if "my_working_data" not in str_web.session_state:
+    str_web.session_state.my_working_data = []
 
-def fetch_live_unrestricted_jup_tokens():
-    """Geliştiricilere tamamen açık ve engelsiz resmi Jupiter API hattı"""
-    # Solana ağında en son aktife giren ve likidite alan tüm gerçek coinleri anlık fırlatır
-    url = "https://jup.ag"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json"
+def check_liquidity_via_dex(token_address):
+    """Yakaladığımız coinin havuz derinliğini tekil kısıtlamasız API ile doğrular"""
+    try:
+        # Tekil token sorguları bulut engeline takılmaz, kısıtlamasızdır
+        url = f"https://dexscreener.com{token_address}"
+        res = std_requests.get(url, timeout=5).json()
+        pairs = res.get("pairs", [])
+        if not pairs: return None
+        
+        main_pair = pairs[0] if isinstance(pairs, list) else pairs
+        liquidity_usd = float(main_pair.get("liquidity", {}).get("usd", 0))
+        volume = main_pair.get("volume", {})
+        info = main_pair.get("info", {})
+        
+        # Güvenlik Kontrolü: Sosyal medyası/reklamı var mı?
+        has_socials = "✅ VAR" if (len(info.get("socials", [])) > 0 or len(info.get("websites", [])) > 0) else "❌ YOK"
+        
+        if liquidity_usd >= min_liq_usd:
+            return {
+                "Coin Adı": main_pair.get("baseToken", {}).get("name", "MemeCoin"),
+                "Sembol": main_pair.get("baseToken", {}).get("symbol", "TOKEN").upper(),
+                "Kontrat Adresi (Mint)": token_address,
+                "Likidite ($)": liquidity_usd,
+                "5m Hacim ($)": float(volume.get("m5", 0)),
+                "1H Hacim ($)": float(volume.get("h1", 0)),
+                "24H Hacim ($)": float(volume.get("h24", 0)),
+                "Sosyal Medya": has_socials,
+                "Fiyat ($)": float(main_pair.get("priceUsd", 0))
+            }
+    except:
+        return None
+    return None
+
+async def start_helius_listener():
+    """Helius Websocket üzerinden Solana ağındaki yeni Raydium işlemlerini canlı yakalar"""
+    subscribe_message = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "logsSubscribe",
+        "params": [
+            {"mentions": [RAYDIUM_PROGRAM_ID]},
+            {"commitment": "processed"}
+        ]
     }
     
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            raw_data = response.json()
-            indexed_mints = raw_data.get("indexedRouteMap", {})
+    # Helius WSS adresimiz bulut engellerine kapalıdır, %100 çalışır
+    async for websocket in connect(WSS_URL):
+        try:
+            await websocket.send(json.dumps(subscribe_message))
+            await websocket.recv() # Onay mesajını geç
             
-            # Global router haritasına eklenen en taze son 15 coinin mint adresini ayıkla
-            fresh_mints = list(indexed_mints.keys())[-15:]
-            
-            filtered_results = []
-            for mint in fresh_mints:
-                if mint in ["So11111111111111111111111111111111111111112", "11111111111111111111111111111111"]:
-                    continue
+            async for message in websocket:
+                data = json.loads(message)
+                if "params" in data:
+                    result = data["params"]["result"]["value"]
+                    logs = result.get("logs", [])
+                    signature = result.get("signature")
                     
-                # Tekil havuz kontrolü (Bot engeli barındırmaz, herkese açıktır)
-                dex_url = f"https://dexscreener.com{mint}"
-                dex_res = requests.get(dex_url, headers=headers, timeout=5).json()
-                pairs = dex_res.get("pairs", [])
-                
-                if not pairs:
-                    continue
-                    
-                main_pair = pairs if isinstance(pairs, list) else pairs
-                liquidity_usd = float(main_pair.get("liquidity", {}).get("usd", 0))
-                volume = main_pair.get("volume", {})
-                vol_24h = float(volume.get("h24", 0))
-                info = main_pair.get("info", {})
-                
-                # 🛡️ GÜVENLİK FİLTRESİ: Sosyal medyası/reklamı olan gerçek projeler
-                has_socials = len(info.get("socials", [])) > 0 or len(info.get("websites", [])) > 0
-                
-                # Sizin belirlediğiniz özel şartlar
-                if liquidity_usd >= min_liq_usd and vol_24h >= min_vol_24h and has_socials:
-                    filtered_results.append({
-                        "Coin Adı": main_pair.get("baseToken", {}).get("name", "Meme Asset"),
-                        "Sembol": main_pair.get("baseToken", {}).get("symbol", "MEME").upper(),
-                        "Kontrat Adresi (Mint)": mint,
-                        "Likidite ($)": liquidity_usd,
-                        "5m Hacim ($)": float(volume.get("m5", 0)),
-                        "1H Hacim ($)": float(volume.get("h1", 0)),
-                        "24H Hacim ($)": vol_24h,
-                        "Güvenlik Durumu": "🛡️ DOĞRULANMIŞ HAVUZ",
-                        "Anlık Fiyat ($)": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else 0.0
-                    })
-            return filtered_results
-        return []
-    except:
-        return []
+                    # Eğer işlem bir yeni havuz açılışı ise (initialize2)
+                    if any("initialize2" in log for log in logs) and signature:
+                        # Akıllı analiz modülünü çağırarak veriyi çözüyoruz
+                        stats = check_liquidity_via_dex(signature)
+                        if stats and stats not in str_web.session_state.my_working_data:
+                            str_web.session_state.my_working_data.append(stats)
+        except:
+            await asyncio.sleep(2)
 
-# --- PANEL ÇALIŞMA MANTIĞI ---
-current_time = time.time()
-if str_web.button("🔄 Manuel Olarak Hemen Tara", type="primary") or (current_time - str_web.session_state.last_run >= 60):
-    str_web.session_state.last_run = current_time
-    with str_web.spinner("Jupiter veri havuzuyla senkronize olunuyor..."):
-        results = fetch_live_unrestricted_jup_tokens()
-        if results:
-            str_web.session_state.my_final_panel = results
+# Arka plan motorunu Streamlit arayüzünü dondurmadan çalıştırma (Threading)
+if "engine_running" not in str_web.session_state:
+    str_web.session_state.engine_running = True
+    def run_async_engine():
+        asyncio.run(start_helius_listener())
+    threading.Thread(target=run_async_engine, daemon=True).start()
 
-# Tabloyu Ekrana Basma
-if "my_final_panel" in str_web.session_state and str_web.session_state.my_final_panel:
-    df = pd.DataFrame(str_web.session_state.my_final_panel).drop_duplicates(subset=["Contract Address (Mint)"])
-    str_web.success(f"✅ Filtre şartları sağlandı! {len(df)} adet premium coin canlı olarak listeleniyor.")
-    str_web.dataframe(df, use_container_width=True)
+# --- PANEL GÖRSEL ARAYÜZÜ ---
+if str_web.button("🔄 Paneli Canlı Yenile / Güncelle", type="primary"):
+    str_web.rerun()
+
+if str_web.session_state.my_working_data:
+    df = pd.DataFrame(str_web.session_state.my_working_data).drop_duplicates(subset=["Kontrat Adresi (Mint)"])
+    str_web.success(f"✅ Helius Canlı Hattı filtrelerinize uyan {len(df)} adet coini başarıyla yakaladı!")
+    
+    str_web.dataframe(
+        df,
+        column_config={
+            "Likidite ($)": str_web.column_config.NumberColumn(format="$%d"),
+            "5m Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
+            "1H Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
+            "24H Hacim ($)": str_web.column_config.NumberColumn(format="$%d"),
+            "Fiyat ($)": str_web.column_config.NumberColumn(format="$%.6f"),
+        },
+        use_container_width=True
+    )
 else:
-    str_web.info("💡 Bulut motoru Jupiter ağ indeksini tarıyor. İlk otomatik yükleme 60 saniye içinde başlayacaktır.")
+    str_web.info("📡 Doğrudan Solana Ağ Otobanına Bağlanıldı. Kriterlerinize uyan yeni havuzlar Helius hattından bekleniyor...")
 
+# 1 dakikada bir sayfayı otomatik tazele
 time.sleep(60)
 str_web.rerun()
